@@ -1,103 +1,181 @@
-import Image from "next/image";
+"use client";
+
+import { FormEvent, useState } from "react";
+
+interface SummaryMeta {
+  id?: string;
+  format?: string;
+  players: { p1: string; p2: string };
+  winner?: string;
+  loser?: string;
+  resultNote?: string;
+}
+
+interface SummaryResponse {
+  html: string;
+  text: string;
+  meta: SummaryMeta;
+  error?: string;
+}
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
+  const [copied, setCopied] = useState(false);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!url.trim()) {
+      setError("Paste a replay link first.");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setCopied(false);
+    try {
+      const response = await fetch("/api/summary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+      const data: SummaryResponse = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to summarize replay");
+      }
+      setSummary(data);
+    } catch (err) {
+      setSummary(null);
+      setError(err instanceof Error ? err.message : "Unexpected error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleCopy() {
+    if (!summary) return;
+    try {
+      if (typeof navigator !== "undefined" && "clipboard" in navigator && typeof ClipboardItem !== "undefined") {
+        const htmlBlob = new Blob([summary.html], { type: "text/html" });
+        const textBlob = new Blob([summary.text], { type: "text/plain" });
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": htmlBlob,
+            "text/plain": textBlob,
+          }),
+        ]);
+      } else if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(summary.text);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to copy to clipboard");
+    }
+  }
+
+  return (
+    <main style={{ maxWidth: "720px", margin: "0 auto", padding: "48px 16px", display: "flex", flexDirection: "column", gap: "24px" }}>
+      <header>
+        <h1 style={{ fontSize: "28px", fontWeight: 600, marginBottom: "8px" }}>Pokémon Showdown Replay Summarizer</h1>
+      </header>
+
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <label htmlFor="replay-url" style={{ fontWeight: 600 }}>Replay link</label>
+        <input
+          id="replay-url"
+          type="url"
+          placeholder="https://replay.pokemonshowdown.com/..."
+          value={url}
+          onChange={(event) => setUrl(event.target.value)}
+          style={{
+            padding: "10px",
+            border: "1px solid #111",
+            fontSize: "16px",
+            fontFamily: "inherit",
+          }}
+          required
+        />
+        <button
+          type="submit"
+          disabled={loading}
+          style={{
+            padding: "10px",
+            background: "#111",
+            color: "#fff",
+            border: "none",
+            fontSize: "16px",
+            cursor: loading ? "wait" : "pointer",
+          }}
+        >
+          {loading ? "Loading…" : "Summarize"}
+        </button>
+      </form>
+
+      {error && (
+        <div style={{ border: "1px solid #aa0000", padding: "12px", background: "#fff5f5" }}>
+          <strong style={{ display: "block", marginBottom: "4px" }}>Error</strong>
+          <span>{error}</span>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+      )}
+
+      {summary && (() => {
+        const { players, format, winner, loser, resultNote } = summary.meta;
+        const p1Tag = winner === players.p1 ? "[W] " : loser === players.p1 ? "[L] " : "";
+        const p2Tag = winner === players.p2 ? "[W] " : loser === players.p2 ? "[L] " : "";
+        return (
+          <section style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+              <div>
+                <strong>Result:</strong> {p1Tag}{players.p1} vs {p2Tag}{players.p2}
+                {format ? ` — ${format}` : ""}
+                {resultNote ? ` (${resultNote})` : ""}
+              </div>
+            </div>
+
+            <div>
+              <button
+                type="button"
+                onClick={handleCopy}
+                disabled={loading}
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid #111",
+                  background: copied ? "#e0ffe0" : "transparent",
+                  cursor: loading ? "not-allowed" : "pointer",
+                }}
+              >
+                {copied ? "Copied!" : "Copy summary to clipboard"}
+              </button>
+            </div>
+
+            <div>
+              <h2 style={{ fontSize: "20px", marginBottom: "8px" }}>Preview</h2>
+              <div
+                style={{ border: "1px solid #111", padding: "16px", overflowX: "auto" }}
+                dangerouslySetInnerHTML={{ __html: summary.html }}
+              />
+            </div>
+
+            <div>
+              <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>Plain text</h3>
+              <pre
+                style={{
+                  border: "1px solid #111",
+                  padding: "16px",
+                  background: "#f7f7f7",
+                  whiteSpace: "pre-wrap",
+                  fontSize: "14px",
+                  lineHeight: 1.4,
+                }}
+              >
+                {summary.text}
+              </pre>
+            </div>
+          </section>
+        );
+      })()}
+    </main>
   );
 }
