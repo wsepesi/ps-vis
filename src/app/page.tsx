@@ -1,6 +1,7 @@
-"use client";
+'use client';
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useState } from 'react';
+import { requestSummary, copySummaryToClipboard } from '@/lib/utils';
 
 interface SummaryMeta {
   id?: string;
@@ -18,8 +19,10 @@ interface SummaryResponse {
   error?: string;
 }
 
+const CLIPBOARD_RESET_DELAY = 2000;
+
 export default function Home() {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
@@ -27,27 +30,22 @@ export default function Home() {
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!url.trim()) {
-      setError("Paste a replay link first.");
+    const sanitizedUrl = url.trim();
+    if (!sanitizedUrl) {
+      setError('Paste a replay link first.');
       return;
     }
+    setUrl(sanitizedUrl);
     setLoading(true);
     setError(null);
     setCopied(false);
+    setSummary(null);
     try {
-      const response = await fetch("/api/summary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url }),
-      });
-      const data: SummaryResponse = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || "Failed to summarize replay");
-      }
-      setSummary(data);
+      const nextSummary = await requestSummary(sanitizedUrl);
+      setSummary(nextSummary);
     } catch (err) {
       setSummary(null);
-      setError(err instanceof Error ? err.message : "Unexpected error");
+      setError(err instanceof Error ? err.message : 'Unexpected error');
     } finally {
       setLoading(false);
     }
@@ -56,126 +54,107 @@ export default function Home() {
   async function handleCopy() {
     if (!summary) return;
     try {
-      if (typeof navigator !== "undefined" && "clipboard" in navigator && typeof ClipboardItem !== "undefined") {
-        const htmlBlob = new Blob([summary.html], { type: "text/html" });
-        const textBlob = new Blob([summary.text], { type: "text/plain" });
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "text/html": htmlBlob,
-            "text/plain": textBlob,
-          }),
-        ]);
-      } else if (typeof navigator !== "undefined" && navigator.clipboard) {
-        await navigator.clipboard.writeText(summary.text);
-      }
+      await copySummaryToClipboard(summary);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => setCopied(false), CLIPBOARD_RESET_DELAY);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to copy to clipboard");
+      setError(err instanceof Error ? err.message : 'Failed to copy summary');
     }
   }
 
   return (
-    <main style={{ maxWidth: "720px", margin: "0 auto", padding: "48px 16px", display: "flex", flexDirection: "column", gap: "24px" }}>
+    <main>
       <header>
-        <h1 style={{ fontSize: "28px", fontWeight: 600, marginBottom: "8px" }}>Pokémon Showdown Replay Summarizer</h1>
+        <h1>ps-vis</h1>
       </header>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-        <label htmlFor="replay-url" style={{ fontWeight: 600 }}>Replay link</label>
+      <form onSubmit={handleSubmit}>
+        <label htmlFor="replay-url">
+          Replay link
+        </label>
         <input
           id="replay-url"
           type="url"
           placeholder="https://replay.pokemonshowdown.com/..."
           value={url}
           onChange={(event) => setUrl(event.target.value)}
-          style={{
-            padding: "10px",
-            border: "1px solid #111",
-            fontSize: "16px",
-            fontFamily: "inherit",
-          }}
           required
         />
         <button
           type="submit"
           disabled={loading}
-          style={{
-            padding: "10px",
-            background: "#111",
-            color: "#fff",
-            border: "none",
-            fontSize: "16px",
-            cursor: loading ? "wait" : "pointer",
-          }}
         >
-          {loading ? "Loading…" : "Summarize"}
+          {loading ? 'Summarizing…' : 'Summarize'}
         </button>
       </form>
 
       {error && (
-        <div style={{ border: "1px solid #aa0000", padding: "12px", background: "#fff5f5" }}>
-          <strong style={{ display: "block", marginBottom: "4px" }}>Error</strong>
-          <span>{error}</span>
+        <div>
+          <strong>Error:</strong> {error}
         </div>
       )}
 
-      {summary && (() => {
-        const { players, format, winner, loser, resultNote } = summary.meta;
-        const p1Tag = winner === players.p1 ? "[W] " : loser === players.p1 ? "[L] " : "";
-        const p2Tag = winner === players.p2 ? "[W] " : loser === players.p2 ? "[L] " : "";
-        return (
-          <section style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-            <div style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
-              <div>
-                <strong>Result:</strong> {p1Tag}{players.p1} vs {p2Tag}{players.p2}
-                {format ? ` — ${format}` : ""}
-                {resultNote ? ` (${resultNote})` : ""}
-              </div>
-            </div>
-
-            <div>
-              <button
-                type="button"
-                onClick={handleCopy}
-                disabled={loading}
-                style={{
-                  padding: "8px 12px",
-                  border: "1px solid #111",
-                  background: copied ? "#e0ffe0" : "transparent",
-                  cursor: loading ? "not-allowed" : "pointer",
-                }}
-              >
-                {copied ? "Copied!" : "Copy summary to clipboard"}
-              </button>
-            </div>
-
-            <div>
-              <h2 style={{ fontSize: "20px", marginBottom: "8px" }}>Preview</h2>
-              <div
-                style={{ border: "1px solid #111", padding: "16px", overflowX: "auto" }}
-                dangerouslySetInnerHTML={{ __html: summary.html }}
-              />
-            </div>
-
-            <div>
-              <h3 style={{ fontSize: "18px", marginBottom: "8px" }}>Plain text</h3>
-              <pre
-                style={{
-                  border: "1px solid #111",
-                  padding: "16px",
-                  background: "#f7f7f7",
-                  whiteSpace: "pre-wrap",
-                  fontSize: "14px",
-                  lineHeight: 1.4,
-                }}
-              >
-                {summary.text}
-              </pre>
-            </div>
-          </section>
-        );
-      })()}
+      {summary && (
+        <SummaryResult
+          summary={summary}
+          copied={copied}
+          loading={loading}
+          onCopy={handleCopy}
+        />
+      )}
     </main>
+  );
+}
+
+interface SummaryResultProps {
+  summary: SummaryResponse;
+  copied: boolean;
+  loading: boolean;
+  onCopy: () => Promise<void>;
+}
+
+function SummaryResult({ summary, copied, loading, onCopy }: SummaryResultProps) {
+  const { players, format, winner, loser, resultNote } = summary.meta;
+  const p1Tag = winner === players.p1 ? '[W] ' : loser === players.p1 ? '[L] ' : '';
+  const p2Tag = winner === players.p2 ? '[W] ' : loser === players.p2 ? '[L] ' : '';
+  const metaLine = `${p1Tag}${players.p1} vs ${p2Tag}${players.p2}`;
+  const formatNote = format ? ` — ${format}` : '';
+  const resultSuffix = resultNote ? ` (${resultNote})` : '';
+
+  return (
+    <section>
+      <div>
+        <div>
+          {metaLine}
+          {formatNote}
+          {resultSuffix}
+        </div>
+        <div>
+          <button
+            type="button"
+            onClick={() => void onCopy()}
+            disabled={loading}
+          >
+            {copied ? 'Copied!' : 'Copy summary to clipboard'}
+          </button>
+        </div>
+      </div>
+
+      <div>
+        <div>
+          <h2>Preview</h2>
+          <div
+            dangerouslySetInnerHTML={{ __html: summary.html }}
+          />
+        </div>
+
+        <div>
+          <h3>Plain text</h3>
+          <pre>
+            {summary.text}
+          </pre>
+        </div>
+      </div>
+    </section>
   );
 }
