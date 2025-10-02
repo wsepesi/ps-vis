@@ -83,6 +83,15 @@ function resolveSide(ref: string): 'p1' | 'p2' {
   return ref.startsWith('p2') ? 'p2' : 'p1';
 }
 
+function formatHPPercentageOnly(hpStatus: HPStatus): string {
+  if (hpStatus.fainted) return 'KO';
+  if (hpStatus.hp) {
+    const percentMatch = hpStatus.hp.match(/^(\d+)\/100$/);
+    return percentMatch ? `${percentMatch[1]}%` : hpStatus.hp;
+  }
+  return hpStatus.raw;
+}
+
 function parseExtras(parts: string[], startIndex: number): string[] {
   return parts
     .slice(startIndex)
@@ -778,7 +787,7 @@ function parseLog(ctx: ParseContext, log: string) {
         if (nickname) mon.nickname = nickname;
         const hpRaw = parts[3] || "";
         const hpStatus = parseHPStatus(hpRaw);
-        mon.lastDisplayHP = formatHPStatus(hpStatus);
+        mon.lastDisplayHP = formatHPPercentageOnly(hpStatus);
         mon.status = hpStatus.status;
         mon.fainted = hpStatus.fainted;
 
@@ -947,28 +956,12 @@ function parseLog(ctx: ParseContext, log: string) {
         const mon = ctx.pokemon.get(ref) || getOrCreatePokemon(ctx, ref, resolveSide(ref));
         const hpRaw = parts[2];
         const hpStatus = parseHPStatus(hpRaw);
-        const oldStatus = mon.status;
         const previous = mon.lastDisplayHP;
         const extras = parseExtras(parts, 3).filter(Boolean);
         const isEOT = extras.some(isEndOfTurnSource);
 
-        // For non-EOT damage, strip status if it hasn't changed
-        const statusChanged = oldStatus !== hpStatus.status;
-        const shouldShowStatus = isEOT || statusChanged;
-
-        // Format HP display based on whether we should show status
-        let formatted: string;
-        if (!shouldShowStatus && hpStatus.status && !hpStatus.fainted) {
-          // Format without status - just show HP percentage
-          if (hpStatus.hp) {
-            const percentMatch = hpStatus.hp.match(/^(\d+)\/100$/);
-            formatted = percentMatch ? `${percentMatch[1]}%` : hpStatus.hp;
-          } else {
-            formatted = hpStatus.raw;
-          }
-        } else {
-          formatted = formatHPStatus(hpStatus);
-        }
+        // Always format HP without status - status only shown in extras like (brn)
+        const formatted = formatHPPercentageOnly(hpStatus);
 
         mon.lastDisplayHP = formatted;
         mon.status = hpStatus.status;
@@ -979,12 +972,8 @@ function parseLog(ctx: ParseContext, log: string) {
           flushPendingFieldEnds(ctx);
         }
 
-        // Strip status from previous HP if not showing status in current
-        let displayPrevious = previous;
-        if (!shouldShowStatus && previous && oldStatus) {
-          // Remove status from previous display (e.g., "33% BRN" -> "33%")
-          displayPrevious = previous.replace(/\s+(BRN|PSN|PAR|SLP|FRZ|TOX)\s*$/i, '');
-        }
+        // Strip status from previous HP display (e.g., "33% BRN" -> "33%")
+        const displayPrevious = previous?.replace(/\s+(BRN|PSN|PAR|SLP|FRZ|TOX)\s*$/i, '') || previous;
 
         const change = displayPrevious && displayPrevious !== formatted ? `${displayPrevious} -> ${formatted}` : formatted;
         const segments = [change];
