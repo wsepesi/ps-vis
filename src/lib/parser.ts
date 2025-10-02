@@ -41,6 +41,7 @@ interface ActionSummary {
   details: DetailEntry[];
   fromIconId?: string;
   fromName?: string;
+  isSpread?: boolean;
 }
 
 interface TurnSummary {
@@ -50,6 +51,7 @@ interface TurnSummary {
   actions: ActionSummary[];
   endEvents: DetailEntry[];
   leadEntries: LeadEntry[];
+  replacementSwitches: ActionSummary[];
 }
 
 interface ParseContext {
@@ -73,6 +75,8 @@ interface ParseContext {
   activePositions: { p1a?: string; p1b?: string; p2a?: string; p2b?: string };
   pendingFieldEnds: Array<{ effect: string }>;
   pendingProtects: Set<string>;
+  pendingTrickItems: Array<{ ref: string; item: string }>;
+  pendingWakeups: Set<string>;
 }
 
 function resolveSide(ref: string): 'p1' | 'p2' {
@@ -158,6 +162,8 @@ function createInitialContext(): ParseContext {
     activePositions: {},
     pendingFieldEnds: [],
     pendingProtects: new Set(),
+    pendingTrickItems: [],
+    pendingWakeups: new Set(),
   };
 }
 
@@ -169,6 +175,7 @@ function createTurn(turn: number, label?: string): TurnSummary {
     actions: [],
     endEvents: [],
     leadEntries: [],
+    replacementSwitches: [],
   };
 }
 
@@ -309,12 +316,24 @@ function iconHTML(iconId: string | undefined, alt: string): string {
   return renderPokemonIcon(iconId || DEFAULT_ICON_ID, alt);
 }
 
+function extractMarkers(displayName: string): string {
+  // Extract markers like (opp), (Protect), (immune) from the end of the name
+  const markerMatch = displayName.match(/(\s*\([^)]+\))+$/);
+  return markerMatch ? markerMatch[0] : '';
+}
+
+function iconHTMLWithMarkers(iconId: string | undefined, displayName: string): string {
+  const icon = iconHTML(iconId, displayName);
+  const markers = extractMarkers(displayName);
+  return markers ? `${icon}${markers}` : icon;
+}
+
 function detailWithIcon(ctx: ParseContext, ref: string, body: string, htmlBody?: string): DetailEntry {
   const side = resolveSide(ref);
   const mon = getOrCreatePokemon(ctx, ref, side);
   const label = getPokemonDisplayName(ctx, ref);
-  const icon = iconHTML(mon.iconId, label);
-  const html = `${icon}${htmlBody ?? body}`;
+  const iconWithMarker = iconHTMLWithMarkers(mon.iconId, label);
+  const html = `${iconWithMarker} ${htmlBody ?? body}`;
   const text = `${label} ${body}`.trim();
   return makeDetail(text, html.trim());
 }
@@ -323,11 +342,11 @@ function actionHeadline(ctx: ParseContext, action: ActionSummary): DualFormat {
   if (action.type === "switch") {
     // Use the actorName that was set at action creation time (includes (opp) if needed)
     const toText = action.actorName || "";
-    const currentIcon = action.actorIconId ? iconHTML(action.actorIconId, toText) : "";
+    const currentIcon = action.actorIconId ? iconHTMLWithMarkers(action.actorIconId, toText) : "";
 
     // Check if this is a replacement entry
     if (action.verb.startsWith("enters")) {
-      const html = `${currentIcon}${action.verb}`.trim();
+      const html = `${currentIcon} ${action.verb}`.trim();
       const text = `${toText} ${action.verb}`.trim();
       return { html, text };
     }
@@ -359,11 +378,12 @@ function actionHeadline(ctx: ParseContext, action: ActionSummary): DualFormat {
 
   // Use the actorName that was set at action creation time (includes (opp) if needed)
   const actorName = action.actorName || "?";
-  const actorIcon = action.actorIconId ? iconHTML(action.actorIconId, actorName) : "";
+  const actorIcon = action.actorIconId ? iconHTMLWithMarkers(action.actorIconId, actorName) : "";
 
-  // Check if self-targeting (no target or actor is target)
+  // Check if self-targeting (no target or actor is target) or spread move
   const isSelfTarget = !action.targetRefs?.length ||
-    (action.targetRefs.length === 1 && action.actorRef === action.targetRefs[0]);
+    (action.targetRefs.length === 1 && action.actorRef === action.targetRefs[0]) ||
+    action.isSpread;
 
   // Use targetNames that were set at action creation time (includes (opp) and (Protect) if needed)
   const targetDisplayNames = action.targetNames && !isSelfTarget
@@ -377,7 +397,7 @@ function actionHeadline(ctx: ParseContext, action: ActionSummary): DualFormat {
     ? action.targetSpecies
         .map((species, idx) => {
           const displayName = targetDisplayNames[idx] || action.targetNames?.[idx] || species;
-          return iconHTML(toIconId(species) || DEFAULT_ICON_ID, displayName);
+          return iconHTMLWithMarkers(toIconId(species) || DEFAULT_ICON_ID, displayName);
         })
         .join(" ")
     : "";
@@ -413,6 +433,75 @@ function combineDetails(details: DetailEntry[]): DualFormat | null {
     text: text || html,
     html: html || text,
   };
+}
+
+function aggregateBoostDetails(details: DetailEntry[]): DetailEntry[] {
+  if (details.length <= 1) return details;
+
+  const result: DetailEntry[] = [];
+  let i = 0;
+
+  while (i < details.length) {
+    const current = details[i];
+
+    // Check if this is a boost detail (contains pattern like "+1 ATK" or "-2 DEF")
+    const boostMatch = current.text.match(/^(.+?)\s+([+-]\d+\s+\w+)$/);
+
+    if (!boostMatch) {
+      // Not a boost, just add it
+      result.push(current);
+      i++;
+      continue;
+    }
+
+    // Extract the prefix (Pokémon name) and boost part
+    const [, prefix, firstBoost] = boostMatch;
+    const boosts: string[] = [firstBoost];
+    const htmlBoosts: string[] = [];
+
+    // Extract boost from HTML (remove icon, get just the boost part)
+    const htmlMatch = current.html.match(/^(.*?)\s+([+-]\d+\s+\w+)$/);
+    if (htmlMatch) {
+      htmlBoosts.push(htmlMatch[2]);
+    }
+
+    // Look ahead for consecutive boosts with the same prefix
+    let j = i + 1;
+    while (j < details.length) {
+      const next = details[j];
+      const nextBoostMatch = next.text.match(/^(.+?)\s+([+-]\d+\s+\w+)$/);
+
+      if (!nextBoostMatch || nextBoostMatch[1] !== prefix) {
+        // Different prefix or not a boost, stop collecting
+        break;
+      }
+
+      boosts.push(nextBoostMatch[2]);
+
+      const nextHtmlMatch = next.html.match(/^(.*?)\s+([+-]\d+\s+\w+)$/);
+      if (nextHtmlMatch) {
+        htmlBoosts.push(nextHtmlMatch[2]);
+      }
+
+      j++;
+    }
+
+    // Create combined boost entry
+    if (boosts.length > 1) {
+      // Multiple boosts - combine with commas
+      const combinedText = `${prefix} ${boosts.join(', ')}`;
+      const htmlPrefix = htmlMatch ? htmlMatch[1] : prefix;
+      const combinedHtml = `${htmlPrefix} ${htmlBoosts.join(', ')}`;
+      result.push(makeDetail(combinedText, combinedHtml));
+      i = j;
+    } else {
+      // Single boost, keep as-is
+      result.push(current);
+      i++;
+    }
+  }
+
+  return result;
 }
 
 function formatTurn(ctx: ParseContext, turn: TurnSummary): { html: string[]; text: string[] } {
@@ -463,28 +552,31 @@ function formatTurn(ctx: ParseContext, turn: TurnSummary): { html: string[]; tex
     // Use comma for single-target moves with details, dash for others
     const isSingleTarget = action.type === "move" &&
       action.targetNames?.length === 1 &&
-      !action.verb.includes("spread");
+      !action.isSpread;
     const separator = action.details.length > 0 && isSingleTarget ? ", " : " — ";
 
-    // For single-target moves with stat boosts, combine with commas instead of semicolons
+    // Aggregate consecutive boost details for the same Pokémon
+    const aggregatedDetails = aggregateBoostDetails(action.details);
+
+    // Combine details
     let combined: DualFormat | null = null;
-    if (isSingleTarget && action.details.length > 0) {
+    if (isSingleTarget && aggregatedDetails.length > 0) {
       // Check if all details are stat boosts (match pattern like "Pokemon +1 ATK", "-2 DEF", etc.)
-      const allBoosts = action.details.every(d => /[+-]\d+\s+\w+/.test(d.text.trim()));
+      const allBoosts = aggregatedDetails.every(d => /[+-]\d+\s+\w+/.test(d.text.trim()));
       if (allBoosts) {
         // Combine boosts with commas
-        const text = action.details.map(d => d.text).filter(Boolean).join(", ");
-        const html = action.details.map(d => d.html || d.text).filter(Boolean).join(", ");
+        const text = aggregatedDetails.map(d => d.text).filter(Boolean).join(", ");
+        const html = aggregatedDetails.map(d => d.html || d.text).filter(Boolean).join(", ");
         combined = { text, html };
       } else {
-        combined = combineDetails(action.details);
+        combined = combineDetails(aggregatedDetails);
       }
     } else {
-      combined = combineDetails(action.details);
+      combined = combineDetails(aggregatedDetails);
     }
 
     // For single-target moves, strip the target name/icon from all details
-    if (combined && isSingleTarget && action.details.length > 0) {
+    if (combined && isSingleTarget && aggregatedDetails.length > 0) {
       const targetIconId = action.targetSpecies?.[0] ? toIconId(action.targetSpecies[0]) : undefined;
       const targetName = action.targetNames?.[0] || "";
 
@@ -512,6 +604,16 @@ function formatTurn(ctx: ParseContext, turn: TurnSummary): { html: string[]; tex
       htmlLines.push(`<div>&nbsp;&nbsp;&nbsp;&nbsp;${combined.html}</div>`);
       textLines.push(`    ${combined.text}`);
     }
+  }
+
+  // Render replacement switches after endEvents
+  for (const replacement of turn.replacementSwitches) {
+    const headline = actionHeadline(ctx, replacement);
+    const combined = combineDetails(replacement.details);
+    const htmlLine = combined ? `${headline.html} — ${combined.html}` : headline.html;
+    const textLine = combined ? `${headline.text} — ${combined.text}` : headline.text;
+    htmlLines.push(`<div>&nbsp;&nbsp;${htmlLine}</div>`);
+    textLines.push(`  ${textLine}`);
   }
 
   return { html: htmlLines, text: textLines };
@@ -576,6 +678,23 @@ function finalizePendingAbilityBoost(ctx: ParseContext) {
   ctx.pendingAbilityBoost = undefined;
 }
 
+function finalizePendingTrickItems(ctx: ParseContext) {
+  if (ctx.pendingTrickItems.length === 0) return;
+
+  // Format: "ItemA to PokemonA, ItemB to PokemonB"
+  const parts: string[] = [];
+  for (const { ref, item } of ctx.pendingTrickItems) {
+    const displayName = getPokemonDisplayName(ctx, ref);
+    parts.push(`${item} to ${displayName}`);
+  }
+
+  const detail = parts.join(', ');
+  appendDetail(ctx, makeDetail(detail));
+
+  // Clear pending items
+  ctx.pendingTrickItems = [];
+}
+
 export interface SummarizedReplay {
   html: string;
   text: string;
@@ -628,6 +747,7 @@ function parseLog(ctx: ParseContext, log: string) {
       }
       case "turn": {
         finalizePendingAbilityBoost(ctx); // Finalize any pending ability boost
+        finalizePendingTrickItems(ctx); // Finalize any pending Trick items
         const turnNumber = Number(parts[1]);
         ctx.leadPhase = false;
         ensureCurrentTurn(ctx, turnNumber);
@@ -645,6 +765,7 @@ function parseLog(ctx: ParseContext, log: string) {
       case "drag":
       case "replace": {
         finalizePendingAbilityBoost(ctx); // Finalize any pending ability boost
+        finalizePendingTrickItems(ctx); // Finalize any pending Trick items
         const { ref, nickname, side } = parsePokemonRef(parts[1]);
         const details = parts[2] || "";
         const species = details.split(",")[0];
@@ -746,11 +867,19 @@ function parseLog(ctx: ParseContext, log: string) {
           fromIconId: isReplacement ? undefined : previousIconId,
           fromName: isReplacement ? undefined : previousName,
         };
-        setCurrentAction(ctx, action);
+
+        // Add replacement switches after endEvents, regular switches as actions
+        if (isReplacement) {
+          ctx.currentTurn.replacementSwitches.push(action);
+          ctx.currentAction = null; // Don't set as current action for replacements
+        } else {
+          setCurrentAction(ctx, action);
+        }
         break;
       }
       case "move": {
         finalizePendingAbilityBoost(ctx); // Finalize any pending ability boost
+        finalizePendingTrickItems(ctx); // Finalize any pending Trick items
         const { ref, nickname, side } = parsePokemonRef(parts[1]);
         const move = prettifyMove(parts[2]);
         const targetRaw = parts[3];
@@ -769,8 +898,19 @@ function parseLog(ctx: ParseContext, log: string) {
         ctx.recentMoves.push({ ref, move });
 
         // Get display names with (opp) if needed at action creation time
-        const actorDisplayName = getPokemonDisplayName(ctx, ref);
+        let actorDisplayName = getPokemonDisplayName(ctx, ref);
+
+        // Check if this Pokémon just woke up
+        if (ctx.pendingWakeups.has(ref)) {
+          actorDisplayName = `${actorDisplayName} (woke up)`;
+          ctx.pendingWakeups.delete(ref);
+        }
+
         const targetDisplayNames = targetRefs?.map(tRef => getPokemonDisplayName(ctx, tRef));
+
+        // Check for spread move before extras are simplified (since [spread] gets filtered out)
+        const isSpread = parts.slice(4).some(part => part.includes('[spread]'));
+        const extras = parseExtras(parts, 4);
 
         const action: ActionSummary = {
           type: "move",
@@ -784,9 +924,10 @@ function parseLog(ctx: ParseContext, log: string) {
           targetNames: targetDisplayNames,
           targetSpecies,
           details: [],
+          isSpread,
         };
-        const extras = parseExtras(parts, 4);
-        if (extras.length) {
+        if (extras.length && !isSpread) {
+          // Don't show [spread] as a detail since we use it to determine formatting
           action.details.push(makeDetail(extras.join('; ')));
         }
         setCurrentAction(ctx, action);
@@ -796,7 +937,8 @@ function parseLog(ctx: ParseContext, log: string) {
         const { ref } = parsePokemonRef(parts[1]);
         const reason = parts[2];
         const move = parts[3] ? ` while using ${prettifyMove(parts[3])}` : "";
-        addNoteAction(ctx, ref, `can't move (${reason}${move})`);
+        const message = reason === "slp" ? "is asleep" : `can't move (${reason}${move})`;
+        addNoteAction(ctx, ref, message);
         break;
       }
       case "-damage":
@@ -805,20 +947,46 @@ function parseLog(ctx: ParseContext, log: string) {
         const mon = ctx.pokemon.get(ref) || getOrCreatePokemon(ctx, ref, resolveSide(ref));
         const hpRaw = parts[2];
         const hpStatus = parseHPStatus(hpRaw);
+        const oldStatus = mon.status;
         const previous = mon.lastDisplayHP;
-        const formatted = formatHPStatus(hpStatus);
+        const extras = parseExtras(parts, 3).filter(Boolean);
+        const isEOT = extras.some(isEndOfTurnSource);
+
+        // For non-EOT damage, strip status if it hasn't changed
+        const statusChanged = oldStatus !== hpStatus.status;
+        const shouldShowStatus = isEOT || statusChanged;
+
+        // Format HP display based on whether we should show status
+        let formatted: string;
+        if (!shouldShowStatus && hpStatus.status && !hpStatus.fainted) {
+          // Format without status - just show HP percentage
+          if (hpStatus.hp) {
+            const percentMatch = hpStatus.hp.match(/^(\d+)\/100$/);
+            formatted = percentMatch ? `${percentMatch[1]}%` : hpStatus.hp;
+          } else {
+            formatted = hpStatus.raw;
+          }
+        } else {
+          formatted = formatHPStatus(hpStatus);
+        }
+
         mon.lastDisplayHP = formatted;
         mon.status = hpStatus.status;
         mon.fainted = hpStatus.fainted;
-        const extras = parseExtras(parts, 3).filter(Boolean);
-        const isEOT = extras.some(isEndOfTurnSource);
 
         // Flush pending field ends before first EOT damage
         if (isEOT && ctx.pendingFieldEnds.length > 0) {
           flushPendingFieldEnds(ctx);
         }
 
-        const change = previous && previous !== formatted ? `${previous} -> ${formatted}` : formatted;
+        // Strip status from previous HP if not showing status in current
+        let displayPrevious = previous;
+        if (!shouldShowStatus && previous && oldStatus) {
+          // Remove status from previous display (e.g., "33% BRN" -> "33%")
+          displayPrevious = previous.replace(/\s+(BRN|PSN|PAR|SLP|FRZ|TOX)\s*$/i, '');
+        }
+
+        const change = displayPrevious && displayPrevious !== formatted ? `${displayPrevious} -> ${formatted}` : formatted;
         const segments = [change];
         if (extras.length) {
           segments.push(`(${extras.join('; ')})`);
@@ -876,7 +1044,13 @@ function parseLog(ctx: ParseContext, log: string) {
       case "-curestatus": {
         const { ref } = parsePokemonRef(parts[1]);
         const status = parts[2].toUpperCase();
-        appendDetail(ctx, detailWithIcon(ctx, ref, `Cured ${status}`));
+        if (status === "SLP") {
+          // Track wakeup to be shown on next move action
+          ctx.pendingWakeups.add(ref);
+        } else {
+          // For other status conditions, show cure detail
+          appendDetail(ctx, detailWithIcon(ctx, ref, `Cured ${status}`));
+        }
         const mon = ctx.pokemon.get(ref);
         if (mon) mon.status = undefined;
         break;
@@ -889,6 +1063,7 @@ function parseLog(ctx: ParseContext, log: string) {
         // If this is a boost ability, start tracking to collect subsequent boosts
         if (fourthParam === 'boost') {
           finalizePendingAbilityBoost(ctx); // Finalize any previous pending boost
+          finalizePendingTrickItems(ctx); // Finalize any pending Trick items
           ctx.pendingAbilityBoost = { ref, ability, boosts: [] };
         } else {
           // Regular ability announcement
@@ -911,14 +1086,25 @@ function parseLog(ctx: ParseContext, log: string) {
         const { ref } = parsePokemonRef(parts[1]);
         const item = parts[2];
         const extras = parseExtras(parts, 3);
+
+        // Special handling for Trick - collect items and format together
+        const isTrick = extras.some(e => e.toLowerCase().includes('trick'));
+        if (isTrick) {
+          ctx.pendingTrickItems.push({ ref, item });
+          // When we have both items (actor and target), finalize
+          if (ctx.pendingTrickItems.length === 2) {
+            finalizePendingTrickItems(ctx);
+          }
+          break;
+        }
+
         appendDetail(ctx, detailWithIcon(ctx, ref, `Item gained: ${item}${formatExtras(extras)}`));
         break;
       }
       case "-enditem": {
         const { ref } = parsePokemonRef(parts[1]);
         const item = parts[2];
-        const extras = parseExtras(parts, 3);
-        appendDetail(ctx, detailWithIcon(ctx, ref, `Item lost: ${item}${formatExtras(extras)}`));
+        appendDetail(ctx, detailWithIcon(ctx, ref, `lost ${item}`));
         break;
       }
       case "-fieldstart": {
@@ -1097,6 +1283,11 @@ function parseLog(ctx: ParseContext, log: string) {
           break;
         }
 
+        // Special handling for Trick - suppress activate detail (redundant with move)
+        if (toId(effect) === 'movetrick' || effect.toLowerCase().includes('trick')) {
+          break;
+        }
+
         const extras = parseExtras(parts, 3);
         const body = `Activates ${effect}${formatExtras(extras)}`;
         appendDetail(ctx, detailWithIcon(ctx, ref, body));
@@ -1147,7 +1338,8 @@ function parseLog(ctx: ParseContext, log: string) {
         const type = parts[2];
         const mon = ctx.pokemon.get(ref);
         const name = mon?.nickname || mon?.species || parts[1];
-        pushHeaderEvent(ctx, `Terastallize ${name} → ${type}`);
+        // Always add to headerEvents, regardless of whether actions have started
+        ctx.currentTurn.headerEvents.push(`Terastallize ${name} → ${type}`);
         break;
       }
       case "detailschange":
